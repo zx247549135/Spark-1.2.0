@@ -28,7 +28,7 @@ import scala.collection.JavaConversions._
 import akka.actor._
 import akka.pattern.ask
 
-import org.apache.spark.scheduler.MapStatus
+import org.apache.spark.scheduler.{HighlyCompressedMapStatus, CompressedMapStatus, MapStatus}
 import org.apache.spark.shuffle.MetadataFetchFailedException
 import org.apache.spark.storage.BlockManagerId
 import org.apache.spark.util._
@@ -130,7 +130,7 @@ private[spark] abstract class MapOutputTracker(conf: SparkConf) extends Logging 
    * Called from executors to get the server URIs and output sizes of the map outputs of
    * a given shuffle.
    */
-  def getServerStatuses(shuffleId: Int, reduceId: Int): Array[(BlockManagerId, Long)] = {
+  def getServerStatuses(shuffleId: Int, reduceId: Int): Array[(BlockManagerId, Int, Long)] = {
     val statuses = mapStatuses.get(shuffleId).orNull
     if (statuses == null) {
       logInfo("Don't have map outputs for shuffle " + shuffleId + ", fetching them")
@@ -236,6 +236,7 @@ private[spark] class MapOutputTrackerMaster(conf: SparkConf)
    * Other than these two scenarios, nothing should be dropped from this HashMap.
    */
   protected val mapStatuses = new TimeStampedHashMap[Int, Array[MapStatus]]()
+  protected val reducePreferredLocs = new TimeStampedHashMap[Int, Array[String]]()
   private val cachedSerializedStatuses = new TimeStampedHashMap[Int, Array[Byte]]()
 
   // For cleaning up TimeStampedHashMaps
@@ -258,9 +259,17 @@ private[spark] class MapOutputTrackerMaster(conf: SparkConf)
   /** Register multiple map output information for the given shuffle */
   def registerMapOutputs(shuffleId: Int, statuses: Array[MapStatus], changeEpoch: Boolean = false) {
     mapStatuses.put(shuffleId, Array[MapStatus]() ++ statuses)
+    reducePreferredLocs.put(shuffleId, getPreferredLocsByMapStatuses(shuffleId))
     if (changeEpoch) {
       incrementEpoch()
     }
+  }
+
+  /** New Function 1
+    * get preferred locations by map status, while the shuffleId is the only parameter */
+  def getPreferredLocsByMapStatuses(shuffleId: Int): Array[String] = {
+    val statuses = mapStatuses.getOrElse(shuffleId, Array[MapStatus]())
+    MapOutputTracker.convertPreferredLocsByMapStatuses(shuffleId, statuses)
   }
 
   /** Unregister map output information of the given shuffle, mapper and block manager */
@@ -371,13 +380,122 @@ private[spark] object MapOutputTracker extends Logging {
     objIn.readObject().asInstanceOf[Array[MapStatus]]
   }
 
+  def convertPreferredLocsByMapStatuses(shuffleId: Int, statuses: Array[MapStatus]): Array[String]={
+    assert(statuses != null)
+    val splitsByHost = new HashMap[String, Array[Long]]
+    var numReduces:Int = 0
+    var sumOfAllBytes:Long=0
+    statuses.map{
+      status =>
+        if(status == null){
+          throw new MetadataFetchFailedException(
+            shuffleId, -1, "Missing an output location for shuffle" + shuffleId)
+        } else {
+          numReduces = status.getNumReduce()
+          val hostname = status.location.host
+          if(!splitsByHost.contains(hostname)){
+            splitsByHost.put(hostname, new Array[Long](numReduces))
+          }
+          var i=0
+          while(i < numReduces){
+            val byteSize = MapStatus.decompressSize(status.getCompressedSizes()(i))
+            splitsByHost(hostname)(i)+=byteSize
+            sumOfAllBytes+=byteSize
+            i+=1
+          }
+        }
+    }
+    if(splitsByHost.size>0){
+      val numOfHosts = splitsByHost.size
+      val preferredHostOfReduces = new Array[String](numReduces)
+      val bytesOfReduces = new Array[Long](numReduces)
+      val hostMaps = new HashMap[Int, String]
+      val splitIndexsOfHost = new Array[HashSet[Int]](numOfHosts)
+      var i = 0
+      var j = 0
+      splitsByHost.toSeq.map(
+        s => {
+          hostMaps.put(i, s._1)
+          splitIndexsOfHost(i) = new HashSet[Int]
+          j=0
+          s._2.map(
+            b=>{
+              bytesOfReduces(j)+=b
+              j+=1
+            }
+          )
+          i+=1
+        }
+      )
+
+      val indexOfBytesOfReduces = new HashMap[Int, Long]
+      for((size, index) <- bytesOfReduces.zipWithIndex){
+        indexOfBytesOfReduces.getOrElseUpdate(index, size)
+      }
+      val sortedIndexOfBytesOfHost = indexOfBytesOfReduces.toSeq.sortWith(_._2 > _._2)
+      val splitsSumOfByteSizeOfHost = new Array[Long](numOfHosts)
+      for(i <- 0 until sortedIndexOfBytesOfHost.length){
+        var minIndex = 0
+        for(j <- 1 until splitsSumOfByteSizeOfHost.length){
+          if(splitsSumOfByteSizeOfHost(j) < splitsSumOfByteSizeOfHost(minIndex))
+            minIndex = j
+        }
+        splitsSumOfByteSizeOfHost(minIndex)+= sortedIndexOfBytesOfHost(i)._2
+        splitIndexsOfHost(minIndex).add(sortedIndexOfBytesOfHost(i)._1)
+      }
+
+      val splitBytesOfHostsAndGroup = new Array[Array[Long]](numOfHosts)
+      for(i <- 0 until splitBytesOfHostsAndGroup.length){
+        splitBytesOfHostsAndGroup(i)=new Array[Long](numOfHosts)
+      }
+      for(i <- 0 until splitIndexsOfHost.length) {
+        val iter: Iterator[Int] = splitIndexsOfHost(i).iterator
+        while (iter.hasNext) {
+          val index = iter.next()
+          val bytesOfHosts: Seq[(String, Long)] = splitsByHost.toSeq.map(s => (s._1, s._2(index)))
+          for (j <- 0 until bytesOfHosts.size) {
+            splitBytesOfHostsAndGroup(i)(j) += bytesOfHosts(j)._2
+          }
+        }
+      }
+      for(i <- 0 until numOfHosts) {
+        var maxCol = 0
+        var maxRow = 0
+        var maxValue = splitBytesOfHostsAndGroup(maxRow)(maxCol)
+        for (j <- 0 until splitBytesOfHostsAndGroup.length) {
+          for (k <- 0 until splitBytesOfHostsAndGroup(j).length) {
+            if (splitBytesOfHostsAndGroup(j)(k) > maxValue) {
+              maxRow = j
+              maxCol = k
+              maxValue = splitBytesOfHostsAndGroup(j)(k)
+            }
+          }
+        }
+        val iter:Iterator[Int] = splitIndexsOfHost(maxRow).iterator
+        while(iter.hasNext){
+          val index=iter.next()
+          preferredHostOfReduces(index)=hostMaps(maxCol)
+        }
+        for(j <- 0 until splitBytesOfHostsAndGroup.length){
+          splitBytesOfHostsAndGroup(j)(maxCol)= -1
+        }
+        for(k <- 0 until splitBytesOfHostsAndGroup.length){
+          splitBytesOfHostsAndGroup(maxRow)(k)= -1
+        }
+      }
+      preferredHostOfReduces
+    }
+    else
+      null
+  }
+
   // Convert an array of MapStatuses to locations and sizes for a given reduce ID. If
   // any of the statuses is null (indicating a missing location due to a failed mapper),
   // throw a FetchFailedException.
   private def convertMapStatuses(
       shuffleId: Int,
       reduceId: Int,
-      statuses: Array[MapStatus]): Array[(BlockManagerId, Long)] = {
+      statuses: Array[MapStatus]): Array[(BlockManagerId, Int, Long)] = {
     assert (statuses != null)
     statuses.map {
       status =>
@@ -386,7 +504,7 @@ private[spark] object MapOutputTracker extends Logging {
           throw new MetadataFetchFailedException(
             shuffleId, reduceId, "Missing an output location for shuffle " + shuffleId)
         } else {
-          (status.location, status.getSizeForBlock(reduceId))
+          (status.location, status.fileGroupID, status.getSizeForBlock(reduceId))
         }
     }
   }
