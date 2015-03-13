@@ -44,6 +44,8 @@ private[spark] abstract class BlockObjectWriter(val blockId: BlockId) {
    */
   def commitAndClose(): Unit
 
+  def reallyClose(): Unit
+
   /**
    * Reverts writes that haven't been flushed yet. Callers should invoke this function
    * when there are runtime exceptions. This method will not throw, though it may be
@@ -61,6 +63,8 @@ private[spark] abstract class BlockObjectWriter(val blockId: BlockId) {
    * This is only valid after commitAndClose() has been called.
    */
   def fileSegment(): FileSegment
+
+  def setShuffleWriteMetrics(writeMetrics: ShuffleWriteMetrics)
 }
 
 /**
@@ -75,7 +79,7 @@ private[spark] class DiskBlockObjectWriter(
     syncWrites: Boolean,
     // These write metrics concurrently shared with other active BlockObjectWriter's who
     // are themselves performing writes. All updates must be relative.
-    writeMetrics: ShuffleWriteMetrics)
+    var writeMetrics: ShuffleWriteMetrics)
   extends BlockObjectWriter(blockId)
   with Logging
 {
@@ -100,7 +104,7 @@ private[spark] class DiskBlockObjectWriter(
    * Cursors used to represent positions in the file.
    *
    * xxxxxxxx|--------|---       |
-   *         ^        ^          ^
+   *         ^        ^          ^^
    *         |        |        finalPosition
    *         |      reportedPosition
    *       initialPosition
@@ -111,15 +115,20 @@ private[spark] class DiskBlockObjectWriter(
    * -----: Current writes to the underlying file.
    * xxxxx: Existing contents of the file.
    */
-  private val initialPosition = file.length()
+  private var initialPosition: Long = 0
   private var finalPosition: Long = -1
-  private var reportedPosition = initialPosition
+  private var reportedPosition: Long = 0
 
   /** Calling channel.position() to update the write metrics can be a little bit expensive, so we
     * only call it every N writes */
   private var writesSinceMetricsUpdate = 0
 
+  private var initialPosition_backup: Long = -1
+  private var finalPosition_backup: Long = -1
+
   override def open(): BlockObjectWriter = {
+    initialPosition = file.length()
+    reportedPosition = initialPosition
     fos = new FileOutputStream(file, true)
     ts = new TimeTrackingOutputStream(fos)
     channel = fos.getChannel()
@@ -161,6 +170,29 @@ private[spark] class DiskBlockObjectWriter(
     finalPosition = file.length()
     // In certain compression codecs, more bytes are written after close() is called
     writeMetrics.shuffleBytesWritten += (finalPosition - reportedPosition)
+
+    initialPosition_backup = initialPosition
+    finalPosition_backup = finalPosition
+    initialPosition = 0
+    finalPosition = -1
+    reportedPosition = 0
+    writesSinceMetricsUpdate = 0
+  }
+
+  override def reallyClose(): Unit = {
+    if(initialized){
+      objOut.flush()
+      bs.flush()
+      updateBytesWritten()
+    }
+    finalPosition = reportedPosition
+
+    initialPosition_backup = initialPosition
+    finalPosition_backup = finalPosition
+    initialPosition = finalPosition
+    finalPosition = -1
+    reportedPosition = initialPosition
+    writesSinceMetricsUpdate = 0
   }
 
   // Discard current writes. We do this by flushing the outstanding writes and then
@@ -172,14 +204,23 @@ private[spark] class DiskBlockObjectWriter(
       if (initialized) {
         objOut.flush()
         bs.flush()
-        close()
+        //close()
       }
 
+      /*
       val truncateStream = new FileOutputStream(file, true)
       try {
         truncateStream.getChannel.truncate(initialPosition)
       } finally {
         truncateStream.close()
+      }
+      */
+      try{
+        channel.truncate(initialPosition)
+      }finally{
+        finalPosition = -1
+        reportedPosition = initialPosition
+        writesSinceMetricsUpdate = 0
       }
     } catch {
       case e: Exception =>
@@ -203,7 +244,8 @@ private[spark] class DiskBlockObjectWriter(
   }
 
   override def fileSegment(): FileSegment = {
-    new FileSegment(file, initialPosition, finalPosition - initialPosition)
+    //new FileSegment(file, initialPosition, finalPosition - initialPosition)
+    new FileSegment(file, initialPosition_backup, finalPosition_backup - initialPosition_backup)
   }
 
   /**
@@ -226,5 +268,9 @@ private[spark] class DiskBlockObjectWriter(
   private[spark] def flush() {
     objOut.flush()
     bs.flush()
+  }
+
+  override def setShuffleWriteMetrics(writeMetricsRef: ShuffleWriteMetrics){
+    writeMetrics = writeMetricsRef
   }
 }
