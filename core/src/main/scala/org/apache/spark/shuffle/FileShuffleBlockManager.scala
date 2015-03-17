@@ -37,7 +37,7 @@ import org.apache.spark.util.collection.{PrimitiveKeyOpenHashMap, PrimitiveVecto
 /** A group of writers for a ShuffleMapTask, one writer per reducer. */
 private[spark] trait ShuffleWriterGroup {
   val writers: Array[BlockObjectWriter]
-
+  val fileGroupID : Int
   /** @param success Indicates all writes were successful. If false, no blocks will be recorded. */
   def releaseWriters(success: Boolean)
 }
@@ -114,11 +114,17 @@ class FileShuffleBlockManager(conf: SparkConf)
 
       val writers: Array[BlockObjectWriter] = if (consolidateShuffleFiles) {
         fileGroup = getUnusedFileGroup()
+        /**
         Array.tabulate[BlockObjectWriter](numBuckets) { bucketId =>
           val blockId = ShuffleBlockId(shuffleId, mapId, bucketId)
           blockManager.getDiskWriter(blockId, fileGroup(bucketId), serializer, bufferSize,
             writeMetrics)
         }
+          */
+        for(i <- 0 until fileGroup.writers.length) {
+          fileGroup.writers(i).setShuffleWriteMetrics(writeMetrics)
+        }
+        fileGroup.writers
       } else {
         Array.tabulate[BlockObjectWriter](numBuckets) { bucketId =>
           val blockId = ShuffleBlockId(shuffleId, mapId, bucketId)
@@ -135,6 +141,8 @@ class FileShuffleBlockManager(conf: SparkConf)
           blockManager.getDiskWriter(blockId, blockFile, serializer, bufferSize, writeMetrics)
         }
       }
+
+      val fileGroupID : Int = if(consolidateShuffleFiles) fileGroup.fileId else -1
 
       override def releaseWriters(success: Boolean) {
         if (consolidateShuffleFiles) {
@@ -160,7 +168,11 @@ class FileShuffleBlockManager(conf: SparkConf)
           val filename = physicalFileName(shuffleId, bucketId, fileId)
           blockManager.diskBlockManager.getFile(filename)
         }
-        val fileGroup = new ShuffleFileGroup(shuffleId, fileId, files)
+        val writers: Array[BlockObjectWriter] = Array.tabulate[BlockObjectWriter](numBuckets){bucketId =>
+          val blockId = ShuffleBlockId(shuffleId,mapId,bucketId)
+          blockManager.getDiskWriter(blockId,files(bucketId),serializer,bufferSize,writeMetrics)
+        }
+        val fileGroup = new ShuffleFileGroup(shuffleId, fileId, files, writers)
         shuffleState.allFileGroups.add(fileGroup)
         fileGroup
       }
@@ -193,6 +205,16 @@ class FileShuffleBlockManager(conf: SparkConf)
     } else {
       val file = blockManager.diskBlockManager.getFile(blockId)
       new FileSegmentManagedBuffer(transportConf, file, 0, file.length)
+    }
+  }
+
+  def closeShuffleWriters(shuffledId:Int): Unit ={
+    val shuffleState = shuffleStates(shuffledId)
+    for(fileGroup <- shuffleState.unusedFileGroups){
+      if(!fileGroup.isCloseAllWriters){
+        fileGroup.closeAllFiles()
+        fileGroup.isCloseAllWriters = true
+      }
     }
   }
 
@@ -246,7 +268,7 @@ object FileShuffleBlockManager {
    * A group of shuffle files, one per reducer.
    * A particular mapper will be assigned a single ShuffleFileGroup to write its output to.
    */
-  private class ShuffleFileGroup(val shuffleId: Int, val fileId: Int, val files: Array[File]) {
+  private class ShuffleFileGroup(val shuffleId: Int, val fileId: Int, val files: Array[File],var writers: Array[BlockObjectWriter]) {
     private var numBlocks: Int = 0
 
     /**
@@ -281,6 +303,7 @@ object FileShuffleBlockManager {
     }
 
     /** Returns the FileSegment associated with the given map task, or None if no entry exists. */
+    /**
     def getFileSegmentFor(mapId: Int, reducerId: Int): Option[FileSegment] = {
       val file = files(reducerId)
       val blockOffsets = blockOffsetsByReducer(reducerId)
@@ -292,6 +315,31 @@ object FileShuffleBlockManager {
         Some(new FileSegment(file, offset, length))
       } else {
         None
+      }
+    }
+    */
+    def getFileSegmentFor(mapId: Int, reducerId: Int): Option[FileSegment] = {
+      val file = files(reducerId)
+      if(mapId == fileId){
+        if(writers(reducerId)!=null&&writers(reducerId).isOpen){
+          writers(reducerId).commitAndClose()
+          writers(reducerId)=null
+        }
+        Some(new FileSegment(file,0,file.length()))
+      }
+      else{
+        None
+      }
+    }
+
+    var isCloseAllWriters:Boolean = false
+
+    def closeAllFiles(): Unit ={
+      for(i<-0 until writers.length){
+        if(writers(i)!=null&&writers(i).isOpen){
+          writers(i).commitAndClose()
+          writers(i)= null
+        }
       }
     }
   }

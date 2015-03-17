@@ -44,6 +44,8 @@ private[spark] class HashShuffleWriter[K, V](
   metrics.shuffleWriteMetrics = Some(writeMetrics)
 
   private val blockManager = SparkEnv.get.blockManager
+  private val consolidateShuffleFiles =
+    blockManager.conf.getBoolean("spark.shuffle.consolidateFiles",false)
   private val ser = Serializer.getSerializer(dep.serializer.getOrElse(null))
   private val shuffle = shuffleBlockManager.forMapTask(dep.shuffleId, mapId, numOutputSplits, ser,
     writeMetrics)
@@ -104,10 +106,13 @@ private[spark] class HashShuffleWriter[K, V](
   private def commitWritesAndBuildStatus(): MapStatus = {
     // Commit the writes. Get the size of each bucket block (total block size).
     val sizes: Array[Long] = shuffle.writers.map { writer: BlockObjectWriter =>
-      writer.commitAndClose()
+      if(consolidateShuffleFiles)
+        writer.reallyClose()
+      else
+        writer.commitAndClose()
       writer.fileSegment().length
     }
-    MapStatus(blockManager.shuffleServerId, sizes)
+    MapStatus(blockManager.shuffleServerId, shuffle.fileGroupID, sizes)
   }
 
   private def revertWrites(): Unit = {
