@@ -27,6 +27,7 @@ private[spark] trait SchedulerBackend {
 
   def start(): Unit
   def stop(): Unit
+  def releaseWriters(shuffleId: Int,executorId: String = "all"):Unit
   def reviveOffers(): Unit
   def defaultParallelism(): Int
 

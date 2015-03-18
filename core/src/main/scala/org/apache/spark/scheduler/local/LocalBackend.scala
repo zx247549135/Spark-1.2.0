@@ -101,6 +101,10 @@ private[spark] class LocalBackend(scheduler: TaskSchedulerImpl, val totalCores: 
     localActor ! StopExecutor
   }
 
+  override def releaseWriters(shuffleId: Int, executorId: String = "all"):Unit={
+
+  }
+
   override def reviveOffers() {
     localActor ! ReviveOffers
   }

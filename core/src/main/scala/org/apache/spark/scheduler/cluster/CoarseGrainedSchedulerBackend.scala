@@ -72,6 +72,7 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val actorSyste
   class DriverActor(sparkProperties: Seq[(String, String)]) extends Actor with ActorLogReceive {
     override protected def log = CoarseGrainedSchedulerBackend.this.log
     private val addressToExecutorId = new HashMap[Address, String]
+    private val executorActor = new HashMap[String, ActorRef]
 
     override def preStart() {
       // Listen for remote client disconnection events, since they don't go through Akka's watch()
@@ -143,6 +144,19 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val actorSyste
         logInfo("Asking each executor to shut down")
         for ((_, executorData) <- executorDataMap) {
           executorData.executorActor ! StopExecutor
+        }
+        sender ! true
+
+      case ReleaseWriters(shuffleId,executorId) =>
+        if(executorId=="all"){
+          logInfo("Asking each executor to release all writers")
+          for(executor <- executorActor.values){
+            executor ! ReleaseWriter(shuffleId)
+          }
+        }
+        else{
+          logInfo("Asking one executor to release all writers")
+          executorActor(executorId) ! ReleaseWriter(shuffleId)
         }
         sender ! true
 
@@ -257,6 +271,10 @@ class CoarseGrainedSchedulerBackend(scheduler: TaskSchedulerImpl, val actorSyste
       case e: Exception =>
         throw new SparkException("Error stopping standalone scheduler's driver actor", e)
     }
+  }
+
+  override def releaseWriters(shuffleId: Int, executorId: String = "all"): Unit ={
+    driverActor ! ReleaseWriters(shuffleId,executorId)
   }
 
   override def reviveOffers() {

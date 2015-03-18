@@ -1010,6 +1010,7 @@ class DAGScheduler(
               logInfo("Ignoring possibly bogus ShuffleMapTask completion from " + execId)
             } else {
               stage.addOutputLoc(smt.partitionId, status)
+              logInfo(" "+status.fileGroupID+" ")
             }
             if (runningStages.contains(stage) && stage.pendingTasks.isEmpty) {
               markStageAsFinished(stage)
@@ -1018,6 +1019,7 @@ class DAGScheduler(
               logInfo("waiting: " + waitingStages)
               logInfo("failed: " + failedStages)
               if (stage.shuffleDep.isDefined) {
+                taskScheduler.releaseWriters(stage.shuffleDep.get.shuffleId,"all")
                 // We supply true to increment the epoch number here in case this is a
                 // recomputation of the map outputs. In that case, some nodes may have cached
                 // locations with holes (from when we detected the error) and will need the
@@ -1338,6 +1340,13 @@ class DAGScheduler(
             return locs
           }
         }
+      case shufDep: ShuffleDependency[_, _, _] =>
+        val loc=mapOutputTracker.getPreferredLocsByReduce(shufDep.shuffleId,partition)
+        if(loc != null){
+          return Seq(TaskLocation(loc))
+        }
+        else
+          return Nil
       case _ =>
     }
     Nil

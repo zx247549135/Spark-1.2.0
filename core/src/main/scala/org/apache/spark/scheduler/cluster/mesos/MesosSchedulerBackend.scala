@@ -338,6 +338,10 @@ private[spark] class MesosSchedulerBackend(
     }
   }
 
+  override def releaseWriters(shuffleId: Int, executorId: String = "all"): Unit ={
+
+  }
+
   override def reviveOffers() {
     driver.reviveOffers()
   }

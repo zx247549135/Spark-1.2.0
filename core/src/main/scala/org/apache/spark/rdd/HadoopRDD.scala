@@ -23,7 +23,7 @@ import java.io.EOFException
 
 import scala.collection.immutable.Map
 import scala.reflect.ClassTag
-import scala.collection.mutable.ListBuffer
+import scala.collection.mutable.{ListBuffer,ArrayBuffer,HashMap}
 
 import org.apache.hadoop.conf.{Configurable, Configuration}
 import org.apache.hadoop.mapred.FileSplit
@@ -128,6 +128,7 @@ class HadoopRDD[K, V](
 
   protected val inputFormatCacheKey = "rdd_%d_input_format".format(id)
 
+  protected val scheduledPreferredLocations = new HashMap[Int, String]()
   // used to build JobTracker ID
   private val createTime = new Date()
 
@@ -200,9 +201,93 @@ class HadoopRDD[K, V](
     }
     val inputSplits = inputFormat.getSplits(jobConf, minPartitions)
     val array = new Array[Partition](inputSplits.size)
+    val hostsInfor = new HashMap[String, ArrayBuffer[(Int, Long)]]()
+    var allOfBytes:Long = 0
     for (i <- 0 until inputSplits.size) {
       array(i) = new HadoopPartition(id, i, inputSplits(i))
+      var hostName = inputSplits(i).getLocations.filter(_ != "localhost")(0)
+      if(hostName.contains("."))
+        hostName=Utils.getAddressHostName(hostName)
+      allOfBytes+=inputSplits(i).getLength
+      hostsInfor.getOrElseUpdate(hostName,ArrayBuffer()) += ((i,inputSplits(i).getLength))
     }
+
+    val hostNum = hostsInfor.size
+    val bytesOfHosts = new Array[Long](hostNum)
+    val namesOfHosts = new Array[String](hostNum)
+    val offsetBytesOfHosts = new Array[Long](hostNum)
+    var i=0
+    hostsInfor.toSeq.map(
+      s => {
+        s._2.map(b=>bytesOfHosts(i)+=b._2)
+        namesOfHosts(i)=s._1
+        i=i+1
+      }
+    )
+    val averageBytesOfEveryHost = allOfBytes/hostNum
+    for(i<-0 until bytesOfHosts.length){
+      offsetBytesOfHosts(i)=averageBytesOfEveryHost-bytesOfHosts(i)
+    }
+    bytesOfHosts.toSeq.map(s=>logInfo(""+s))
+
+    val redundantBlock = new ArrayBuffer[(Int,Long)]
+    for(i <- 0 until bytesOfHosts.length){
+      if(offsetBytesOfHosts(i)<0){
+        val sortedIndexOfBytesOfHost=hostsInfor(namesOfHosts(i)).toSeq.sortWith(_._2<_._2)
+        var isFinished = false
+        var bytesAfterAdd=offsetBytesOfHosts(i)
+        var untilIndex=0
+        for(j <- 0 until sortedIndexOfBytesOfHost.length if !isFinished){
+          if(bytesAfterAdd+sortedIndexOfBytesOfHost(j)._2>0){
+            isFinished = true
+            untilIndex = j
+          }
+          else
+            bytesAfterAdd+=sortedIndexOfBytesOfHost(j)._2
+        }
+        for(j <- 0 until untilIndex){
+          redundantBlock += ((sortedIndexOfBytesOfHost(j)._1,sortedIndexOfBytesOfHost(j)._2))
+          bytesOfHosts(i)-=sortedIndexOfBytesOfHost(j)._2
+        }
+        for(j <- 0 until untilIndex){
+          hostsInfor(namesOfHosts(i))-= ((sortedIndexOfBytesOfHost(j)._1, sortedIndexOfBytesOfHost(j)._2))
+        }
+      }
+    }
+
+    val sortedRedundantBlock=redundantBlock.toSeq.sortWith(_._2>_._2)
+    for(i <- 0 until sortedRedundantBlock.length){
+      var minIndex = 0
+      var minBytes = Long.MaxValue
+      for(j <- 0 until bytesOfHosts.length){
+        if(offsetBytesOfHosts(j)>0){
+          if(bytesOfHosts(j)<minBytes){
+            minIndex = j
+            minBytes = bytesOfHosts(j)
+          }
+        }
+      }
+      hostsInfor(namesOfHosts(minIndex))+=((sortedRedundantBlock(i)._1,sortedRedundantBlock(i)._2))
+      bytesOfHosts(minIndex)+=sortedRedundantBlock(i)._2
+    }
+
+    hostsInfor.toSeq.map(s=>{s._2.map(b=>scheduledPreferredLocations.put(b._1,s._1))})
+    hostsInfor.toSeq.map(s=>logInfo(""+s._1+":"+s._2.size))
+    logInfo(""+scheduledPreferredLocations.size)
+    logInfo(""+hostsInfor.size)
+    logInfo(""+inputSplits.size)
+    logInfo(""+hostNum)
+    bytesOfHosts.toSeq.map(s=>logInfo(""+s))
+
+    val outputBytesOfHosts=new Array[Long](hostNum)
+    i=0
+    hostsInfor.toSeq.map(
+      s =>{
+        s._2.map(b=>outputBytesOfHosts(i)+=b._2)
+        i=i+1
+      }
+    )
+    outputBytesOfHosts.toSeq.map(s=>logInfo(""+s))
     array
   }
 

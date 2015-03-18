@@ -38,6 +38,8 @@ private[spark] object CoarseGrainedClusterMessages {
 
   case class RegisterExecutorFailed(message: String) extends CoarseGrainedClusterMessage
 
+  case class ReleaseWriter(shuffleId:Int) extends CoarseGrainedClusterMessage
+
   // Executors to driver
   case class RegisterExecutor(executorId: String, hostPort: String, cores: Int)
     extends CoarseGrainedClusterMessage {
@@ -57,6 +59,8 @@ private[spark] object CoarseGrainedClusterMessages {
 
   // Internal messages in driver
   case object ReviveOffers extends CoarseGrainedClusterMessage
+
+  case class ReleaseWriters(shuffleId: Int, executorId: String = "all") extends CoarseGrainedClusterMessage
 
   case object StopDriver extends CoarseGrainedClusterMessage
 

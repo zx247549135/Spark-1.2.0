@@ -135,6 +135,13 @@ private[spark] class Executor(
     }
   }
 
+  def releaseWriter(shuffleId:Int): Unit ={
+    val blockManager = SparkEnv.get.blockManager
+    val shuffleBlockManager = blockManager.shuffleBlockManager
+    if(blockManager.conf.getBoolean("spark.shuffle.consolidateFiles", false))
+      shuffleBlockManager.closeShuffleWriters(shuffleId)
+  }
+
   def stop() {
     env.metricsSystem.report()
     env.actorSystem.stop(executorActor)

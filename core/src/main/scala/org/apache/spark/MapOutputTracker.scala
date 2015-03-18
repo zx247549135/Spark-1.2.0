@@ -272,6 +272,18 @@ private[spark] class MapOutputTrackerMaster(conf: SparkConf)
     MapOutputTracker.convertPreferredLocsByMapStatuses(shuffleId, statuses)
   }
 
+  /** New Function 2
+    * get preferred locations by reduceId
+    */
+  def getPreferredLocsByReduce(shuffleId: Int, partition: Int):String = {
+    if(reducePreferredLocs.contains(shuffleId)){
+      val prefer = reducePreferredLocs.getOrElse(shuffleId,Array[String]())
+      if(prefer != null)
+        return prefer(partition)
+    }
+    null
+  }
+
   /** Unregister map output information of the given shuffle, mapper and block manager */
   def unregisterMapOutput(shuffleId: Int, mapId: Int, bmAddress: BlockManagerId) {
     val arrayOpt = mapStatuses.get(shuffleId)

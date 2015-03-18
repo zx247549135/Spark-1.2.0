@@ -399,6 +399,10 @@ private[spark] class TaskSchedulerImpl(
     Thread.sleep(1000L)
   }
 
+  override def releaseWriters(shuffleId: Int, executorId : String = "all"): Unit ={
+    backend.releaseWriters(shuffleId,executorId)
+  }
+
   override def defaultParallelism() = backend.defaultParallelism()
 
   // Check for speculatable tasks in all our active jobs.

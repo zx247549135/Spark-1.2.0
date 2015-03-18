@@ -47,6 +47,8 @@ private[spark] trait TaskScheduler {
   // Disconnect from the cluster.
   def stop(): Unit
 
+  def releaseWriters(shuffleId: Int, executorId: String = "all"): Unit
+
   // Submit a sequence of tasks to run.
   def submitTasks(taskSet: TaskSet): Unit
 

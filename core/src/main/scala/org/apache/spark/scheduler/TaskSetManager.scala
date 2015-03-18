@@ -77,6 +77,7 @@ private[spark] class TaskSetManager(
   val tasks = taskSet.tasks
   val numTasks = tasks.length
   val copiesRunning = new Array[Int](numTasks)
+  var numOfRunningOrRunnedTask:Int=0
   val successful = new Array[Boolean](numTasks)
   private val numFailures = new Array[Int](numTasks)
   // key is taskId, value is a Map of executor id to when it failed
@@ -443,6 +444,7 @@ private[spark] class TaskSetManager(
           val taskId = sched.newTaskId()
           // Do various bookkeeping
           copiesRunning(index) += 1
+          numOfRunningOrRunnedTask += 1
           val attemptNum = taskAttempts(index).size
           val info = new TaskInfo(taskId, index, attemptNum, curTime,
             execId, host, taskLocality, speculative)
@@ -586,6 +588,7 @@ private[spark] class TaskSetManager(
     info.markFailed()
     val index = info.index
     copiesRunning(index) -= 1
+    numOfRunningOrRunnedTask -=1
     var taskMetrics : TaskMetrics = null
 
     val failureReason = s"Lost task ${info.id} in stage ${taskSet.id} (TID $tid, ${info.host}): " +
@@ -684,6 +687,10 @@ private[spark] class TaskSetManager(
     }
   }
 
+  def taskIsAllRunningOrRunned(): Boolean = {
+    return numOfRunningOrRunnedTask==numTasks
+  }
+
   override def getSchedulableByName(name: String): Schedulable = {
     null
   }
@@ -722,6 +729,7 @@ private[spark] class TaskSetManager(
         if (successful(index)) {
           successful(index) = false
           copiesRunning(index) -= 1
+          numOfRunningOrRunnedTask -= 1
           tasksSuccessful -= 1
           addPendingTask(index)
           // Tell the DAGScheduler that this task was resubmitted so that it doesn't think our

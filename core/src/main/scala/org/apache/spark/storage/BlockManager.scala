@@ -39,7 +39,7 @@ import org.apache.spark.network.shuffle.ExternalShuffleClient
 import org.apache.spark.network.shuffle.protocol.ExecutorShuffleInfo
 import org.apache.spark.network.util.{ConfigProvider, TransportConf}
 import org.apache.spark.serializer.Serializer
-import org.apache.spark.shuffle.ShuffleManager
+import org.apache.spark.shuffle.{FileShuffleBlockManager, ShuffleManager}
 import org.apache.spark.shuffle.hash.HashShuffleManager
 import org.apache.spark.util._
 
@@ -78,7 +78,7 @@ private[spark] class BlockManager(
   extends BlockDataManager with Logging {
 
   val diskBlockManager = new DiskBlockManager(this, conf)
-
+  val shuffleBlockManager = new FileShuffleBlockManager(conf)
   private val blockInfo = new TimeStampedHashMap[BlockId, BlockInfo]
 
   // Actual storage of where blocks are kept
