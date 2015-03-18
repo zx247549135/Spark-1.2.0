@@ -38,20 +38,38 @@ private[hash] object BlockStoreShuffleFetcher extends Logging {
     logDebug("Fetching outputs for shuffle %d, reduce %d".format(shuffleId, reduceId))
     val blockManager = SparkEnv.get.blockManager
 
+    val consolidateShuffleFiles =
+      blockManager.conf.getBoolean("spark.shuffle.consolidateFiles",false)
+
     val startTime = System.currentTimeMillis
     val statuses = SparkEnv.get.mapOutputTracker.getServerStatuses(shuffleId, reduceId)
     logDebug("Fetching map output location for shuffle %d, reduce %d took %d ms".format(
       shuffleId, reduceId, System.currentTimeMillis - startTime))
 
-    val splitsByAddress = new HashMap[BlockManagerId, ArrayBuffer[(Int, Long)]]
-    for (((address, size), index) <- statuses.zipWithIndex) {
-      splitsByAddress.getOrElseUpdate(address, ArrayBuffer()) += ((index, size))
+    val splitsByAddress = new HashMap[BlockManagerId, ArrayBuffer[(Int, Int ,Long)]]
+    for (((address,fileid, size), index) <- statuses.zipWithIndex) {
+      splitsByAddress.getOrElseUpdate(address, ArrayBuffer()) += ((index,fileid, size))
     }
 
-    val blocksByAddress: Seq[(BlockManagerId, Seq[(BlockId, Long)])] = splitsByAddress.toSeq.map {
-      case (address, splits) =>
-        (address, splits.map(s => (ShuffleBlockId(shuffleId, s._1, reduceId), s._2)))
-    }
+    val blocksByAddress: Seq[(BlockManagerId, Seq[(BlockId, Long)])] =
+      if(consolidateShuffleFiles) {
+        splitsByAddress.toSeq.map {
+          case (address, splits) => {
+            val splitsByFileID = new HashMap[Int, Long]
+            splits.map(s => {
+              if (splitsByFileID.contains(s._2))
+                splitsByFileID(s._2) += s._3
+              else
+                splitsByFileID+=((s._2,s._3))
+            })
+            (address, splitsByFileID.toSeq.map(s => (ShuffleBlockId(shuffleId, s._1, reduceId), s._2)))
+          }
+        }
+      }else{
+        splitsByAddress.toSeq.map{
+          case (address, splits) =>
+            (address, splits.map(s=> (ShuffleBlockId(shuffleId,s._1,reduceId),s._3)))}
+      }
 
     def unpackBlock(blockPair: (BlockId, Try[Iterator[Any]])) : Iterator[T] = {
       val blockId = blockPair._1
