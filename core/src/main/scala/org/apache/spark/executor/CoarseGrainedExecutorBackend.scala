@@ -93,6 +93,10 @@ private[spark] class CoarseGrainedExecutorBackend(
       executor.stop()
       context.stop(self)
       context.system.shutdown()
+
+    case ReleaseWriter(shuffleId) =>
+      logInfo("Received Release all writers command")
+      executor.releaseWriter(shuffleId)
   }
 
   override def statusUpdate(taskId: Long, state: TaskState, data: ByteBuffer) {
